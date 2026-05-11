@@ -17,9 +17,10 @@ fn band_freq(lambda_angstrom: f64) -> f64 {
     C_ANGSTROM_PER_SEC / lambda_angstrom
 }
 
-fn sbpl_flux(t: f64, nu: f64, alpha1: f64, alpha2: f64, beta: f64, d: f64, loga: f64, tb: f64, t0: f64) -> f64 {
+fn sbpl_flux(t: f64, nu: f64, alpha1: f64, alpha2: f64, beta: f64, logd: f64, loga: f64, tb: f64, t0: f64) -> f64 {
     let tau = t - t0;
-    if tb <= 0.0 || d <= 0.0 || nu <= 0.0 {
+    let d = 10f64.powf(logd);
+    if tb <= 0.0 || nu <= 0.0 {
         return f64::NAN;
     }
     if tau < 0.0 {
@@ -60,7 +61,7 @@ fn normal(rng: &mut u64) -> f64 {
 fn generate_sbpl_source(
     n_per_band: usize,
     seed: u64,
-    alpha1: f64, alpha2: f64, beta: f64, d: f64, loga: f64, tb: f64, t0: f64,
+    alpha1: f64, alpha2: f64, beta: f64, logd: f64, loga: f64, tb: f64, t0: f64,
 ) -> HashMap<String, BandData> {
     let mut rng = seed.max(1);
 
@@ -85,7 +86,7 @@ fn generate_sbpl_source(
 
         for j in 0..n_per_band {
             let t = t_start + (t_end - t_start) * (j as f64) / (n_per_band as f64 - 1.0).max(1.0);
-            let flux_true = sbpl_flux(t, nu, alpha1, alpha2, beta, d, loga, tb, t0);
+            let flux_true = sbpl_flux(t, nu, alpha1, alpha2, beta, logd, loga, tb, t0);
             let noise_sigma = flux_true.abs() * noise_frac + 1e-20;
             let flux_obs = flux_true + noise_sigma * normal(&mut rng);
             times.push(t);
@@ -142,19 +143,17 @@ fn sbpl_n_obs_and_bands_correct() {
 #[test]
 fn sbpl_recovers_spectral_index() {
     // Generate a true-SBPL source and check parameters are in the right ballpark.
-    // alpha1 + alpha2 must be non-zero so the smoothing term is active.
     let true_alpha1 = 2.0;
-    let true_alpha2 = -2.0;
+    let true_alpha2 = -2.3;
     let true_beta   = -0.8;
-    let true_d      = 0.5;
-    // loga=12 gives F~1 Jy for typical optical nu (~6e14 Hz) at beta=-0.8
+    let true_logd    = -0.3;
     let true_loga   = 12.0;
     let true_tb     = 10.0;
     let true_t0     = 5.0;
 
     let flux_bands = generate_sbpl_source(
         40, 1234,
-        true_alpha1, true_alpha2, true_beta, true_d, true_loga, true_tb, true_t0,
+        true_alpha1, true_alpha2, true_beta, true_logd, true_loga, true_tb, true_t0,
     );
 
     let result = fit_sbpl(&flux_bands).expect("fit_sbpl should return Some for SBPL source");
@@ -163,7 +162,7 @@ fn sbpl_recovers_spectral_index() {
     println!("  alpha1 = {:?}  (true: {true_alpha1})", result.alpha1);
     println!("  alpha2 = {:?}  (true: {true_alpha2})", result.alpha2);
     println!("  beta   = {:?}  (true: {true_beta})", result.beta);
-    println!("  D      = {:?}  (true: {true_d})", result.d);
+    println!("  logd   = {:?}  (true: {true_logd})", result.logd);
     println!("  loga   = {:?}  (true: {true_loga})", result.loga);
     println!("  tb     = {:?}  (true: {true_tb})", result.tb);
     println!("  t0     = {:?}  (true: {true_t0})", result.t0);
@@ -179,7 +178,7 @@ fn sbpl_recovers_spectral_index() {
 fn sbpl_errors_are_finite_when_populated() {
     // loga=12 gives O(1) Jy for optical nu at beta=-0.6
     let flux_bands = generate_sbpl_source(
-        40, 9999, 1.0, -1.0, -0.6, 0.3, 12.0, 3.0, 0.0,
+        40, 9999, 1.0, -1.0, -0.6, -0.3, 12.0, 3.0, 0.0,
     );
     let result = fit_sbpl(&flux_bands).unwrap();
 
@@ -187,7 +186,7 @@ fn sbpl_errors_are_finite_when_populated() {
         ("alpha1_err", result.alpha1_err),
         ("alpha2_err", result.alpha2_err),
         ("beta_err",   result.beta_err),
-        ("d_err",      result.d_err),
+        ("logd_err",      result.logd_err),
         ("loga_err",   result.loga_err),
         ("tb_err",     result.tb_err),
         ("t0_err",     result.t0_err),

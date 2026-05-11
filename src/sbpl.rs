@@ -9,8 +9,8 @@
 //! After fitting, loga is corrected back to physical units:
 //!   loga_phys = loga_fit + log10(max_flux) − 15·β
 //!
-/// Optimisation: 20 seeded random-uniform restarts with L-BFGS polishing,
-/// mirroring fit_sbpl_with_priors in the Python notebook. The best result is returned.
+/// Optimisation: deterministic multi-restart PSO for global search, followed
+/// by L-BFGS polishing for local refinement. The best result is returned.
 
 use std::collections::HashMap;
 
@@ -52,13 +52,14 @@ fn sbpl_model(
     alpha1: f64,
     alpha2: f64,
     beta: f64,
-    d: f64,
+    logd: f64,
     loga: f64,
     tb: f64,
     t0: f64,
 ) -> f64 {
     let tau = t - t0;
-    if tb <= 0.0 || d <= 0.0 || nu_scaled <= 0.0 {
+
+    if tb <= 0.0 || nu_scaled <= 0.0 {
         return f64::NAN;
     }
     if tau < 0.0 {
@@ -70,11 +71,11 @@ fn sbpl_model(
     }
     let term1 = nu_scaled.powf(beta);
     let term2 = ratio.powf(alpha1);
-    let inner = 0.5 * (1.0 + ratio.powf(1.0 / d));
+    let inner = 0.5 * (1.0 + ratio.powf(1.0 / 10f64.powf(logd)));
     if !inner.is_finite() || inner <= 0.0 {
         return f64::NAN;
     }
-    let term3 = inner.powf((alpha2 - alpha1) * d);
+    let term3 = inner.powf((alpha2 - alpha1) * 10f64.powf(logd));
     let result = 10f64.powf(loga) * term1 * term2 * term3;
     if result.is_finite() { result } else { f64::NAN }
 }
@@ -97,19 +98,18 @@ struct SbplCost {
 }
 
 impl SbplCost {
-    /// Evaluate chi2/n_valid for parameter vector `p = [alpha1, alpha2, beta, d, loga, tb, t0]`.
+    /// Evaluate chi2/n_valid for parameter vector `p = [alpha1, alpha2, beta, logd, loga, tb, t0]`.
     fn eval(&self, p: &[f64]) -> f64 {
-        let (alpha1, alpha2, beta, d, loga, tb, t0) =
+        let (alpha1, alpha2, beta, logd, loga, tb, t0) =
             (p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
 
         let mut chi2 = 0.0;
         let mut n_valid = 0usize;
         for obs in &self.observations {
             let model =
-                sbpl_model(obs.time, obs.nu_scaled, alpha1, alpha2, beta, d, loga, tb, t0);
+                sbpl_model(obs.time, obs.nu_scaled, alpha1, alpha2, beta, logd, loga, tb, t0);
             if !model.is_finite() {
-                chi2 += 1e4;
-                continue;
+                return 1e10;
             }
             let residual = obs.flux - model;
             let err_sq = obs.flux_err * obs.flux_err + 1e-30;
@@ -243,6 +243,83 @@ fn lbfgs_refine(
     }
 }
 
+/// Global search with particle swarm optimisation in physical parameter space.
+/// Returns (best_params, best_cost).
+fn pso_search(
+    problem: &SbplCost,
+    lower: &[f64],
+    upper: &[f64],
+    n_particles: usize,
+    n_iters: usize,
+    rng: &mut rand::rngs::SmallRng,
+) -> (Vec<f64>, f64) {
+    let n_dim = lower.len();
+    let span: Vec<f64> = lower
+        .iter()
+        .zip(upper.iter())
+        .map(|(&lo, &hi)| hi - lo)
+        .collect();
+
+    let mut pos: Vec<Vec<f64>> = (0..n_particles)
+        .map(|_| {
+            lower
+                .iter()
+                .zip(upper.iter())
+                .map(|(&lo, &hi)| rng.random_range(lo..hi))
+                .collect()
+        })
+        .collect();
+
+    let mut vel: Vec<Vec<f64>> = (0..n_particles)
+        .map(|_| {
+            span.iter()
+                .map(|&s| rng.random_range(-0.1 * s..0.1 * s))
+                .collect()
+        })
+        .collect();
+
+    let mut pbest_pos = pos.clone();
+    let mut pbest_cost: Vec<f64> = pos.iter().map(|p| problem.eval(p)).collect();
+
+    let mut gbest_idx = 0usize;
+    for i in 1..n_particles {
+        if pbest_cost[i] < pbest_cost[gbest_idx] {
+            gbest_idx = i;
+        }
+    }
+    let mut gbest_pos = pbest_pos[gbest_idx].clone();
+    let mut gbest_cost = pbest_cost[gbest_idx];
+
+    let w = 0.7298;
+    let c1 = 1.4962;
+    let c2 = 1.4962;
+
+    for _ in 0..n_iters {
+        for i in 0..n_particles {
+            for d in 0..n_dim {
+                let r1: f64 = rng.random();
+                let r2: f64 = rng.random();
+                vel[i][d] = w * vel[i][d]
+                    + c1 * r1 * (pbest_pos[i][d] - pos[i][d])
+                    + c2 * r2 * (gbest_pos[d] - pos[i][d]);
+                pos[i][d] = (pos[i][d] + vel[i][d]).clamp(lower[d], upper[d]);
+            }
+
+            let cost = problem.eval(&pos[i]);
+            if cost < pbest_cost[i] {
+                pbest_cost[i] = cost;
+                pbest_pos[i] = pos[i].clone();
+            }
+            if cost < gbest_cost {
+                gbest_cost = cost;
+                gbest_pos = pos[i].clone();
+            }
+        }
+    }
+
+    (gbest_pos, gbest_cost)
+}
+
 // ---------------------------------------------------------------------------
 // Result struct
 // ---------------------------------------------------------------------------
@@ -256,8 +333,8 @@ pub struct SbplResult {
     pub alpha2: Option<f64>,
     /// Spectral index (F_ν ∝ ν^β).
     pub beta: Option<f64>,
-    /// Break smoothness parameter D.
-    pub d: Option<f64>,
+    /// logarithm of the break smoothness parameter D.
+    pub logd: Option<f64>,
     /// Physical log10 flux normalisation (after rescaling from normalised fit space).
     pub loga: Option<f64>,
     /// Break time tb (days).
@@ -268,7 +345,7 @@ pub struct SbplResult {
     pub alpha1_err: Option<f64>,
     pub alpha2_err: Option<f64>,
     pub beta_err: Option<f64>,
-    pub d_err: Option<f64>,
+    pub logd_err: Option<f64>,
     pub loga_err: Option<f64>,
     pub tb_err: Option<f64>,
     pub t0_err: Option<f64>,
@@ -286,14 +363,14 @@ impl SbplResult {
             alpha1: None,
             alpha2: None,
             beta: None,
-            d: None,
+            logd: None,
             loga: None,
             tb: None,
             t0: None,
             alpha1_err: None,
             alpha2_err: None,
             beta_err: None,
-            d_err: None,
+            logd_err: None,
             loga_err: None,
             tb_err: None,
             t0_err: None,
@@ -388,17 +465,17 @@ pub fn fit_sbpl(bands: &HashMap<String, BandData>) -> Option<SbplResult> {
     let lower = vec![
         -10.0,                   // alpha1
         -10.0,                   // alpha2
-        -10.0,                   // beta
-        1e-3,                    // d
+        -5.0,                   // beta
+        -3.0,                    // logd
         -10.0,                   // loga (normalised)
         t_min + 0.01 * duration, // tb
-        t_min - 0.1 * duration,  // t0
+        t_min - 100.0,  // t0
     ];
     let upper = vec![
         10.0,  // alpha1
         10.0,  // alpha2
-        10.0,  // beta
-        5.0,   // d
+        5.0,  // beta
+        0.0,   // logd
         10.0,  // loga (normalised)
         t_max, // tb
         t_max, // t0
@@ -407,10 +484,13 @@ pub fn fit_sbpl(bands: &HashMap<String, BandData>) -> Option<SbplResult> {
     let problem = SbplCost { observations };
 
     // -----------------------------------------------------------------------
-    // Multi-start L-BFGS: random uniform restarts inside bounds.
+    // Multi-start PSO + L-BFGS: PSO provides global exploration and L-BFGS
+    // performs local polishing.
     // -----------------------------------------------------------------------
-    const N_RESTARTS: usize = 30;
-    const SEED: u64 = 2026;
+    const N_RESTARTS: usize = 3;
+    const N_PARTICLES: usize = 30;
+    const N_ITERS: usize = 200;
+    const SEED: u64 = 1234;
     let mut rng = rand::rngs::SmallRng::seed_from_u64(SEED);
 
     let mut all_params: Vec<Vec<f64>> = Vec::new();
@@ -418,17 +498,14 @@ pub fn fit_sbpl(bands: &HashMap<String, BandData>) -> Option<SbplResult> {
     let mut best_params: Vec<f64> = lower.clone();
 
     for _ in 0..N_RESTARTS {
-        let start: Vec<f64> = lower
-            .iter()
-            .zip(upper.iter())
-            .map(|(&lo, &hi)| rng.random_range(lo..hi))
-            .collect();
-        let init_cost = problem.eval(&start);
-        let (refined, refined_cost) = lbfgs_refine(&problem, start, init_cost, &lower, &upper);
-        all_params.push(refined.clone());
+        let (pso_best, pso_cost) =
+            pso_search(&problem, &lower, &upper, N_PARTICLES, N_ITERS, &mut rng);
+        let (refined_best, refined_cost) = 
+            lbfgs_refine(&problem, pso_best, pso_cost, &lower, &upper);
+        all_params.push(refined_best.clone());
         if refined_cost < best_cost {
             best_cost = refined_cost;
-            best_params = refined;
+            best_params = refined_best;
         }
     }
 
@@ -475,14 +552,14 @@ pub fn fit_sbpl(bands: &HashMap<String, BandData>) -> Option<SbplResult> {
         alpha1: finite_or_none(best_params[0]),
         alpha2: finite_or_none(best_params[1]),
         beta: finite_or_none(best_params[2]),
-        d: finite_or_none(best_params[3]),
+        logd: finite_or_none(best_params[3]),
         loga: finite_or_none(best_params[4]),
         tb: finite_or_none(best_params[5]),
         t0: finite_or_none(best_params[6]),
         alpha1_err: finite_or_none(stds[0]),
         alpha2_err: finite_or_none(stds[1]),
         beta_err: finite_or_none(stds[2]),
-        d_err: finite_or_none(stds[3]),
+        logd_err: finite_or_none(stds[3]),
         loga_err: finite_or_none(stds[4]),
         tb_err: finite_or_none(stds[5]),
         t0_err: finite_or_none(stds[6]),

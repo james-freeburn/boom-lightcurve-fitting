@@ -510,14 +510,14 @@ fn extract_sbpl_features(sbpl: &Option<SbplResult>) -> FeatureMap {
             f.insert("sbpl_alpha1".into(), s.alpha1);
             f.insert("sbpl_alpha2".into(), s.alpha2);
             f.insert("sbpl_beta".into(), s.beta);
-            f.insert("sbpl_d".into(), s.d);
+            f.insert("sbpl_logd".into(), s.logd);
             f.insert("sbpl_loga".into(), s.loga);
             f.insert("sbpl_tb".into(), s.tb);
             f.insert("sbpl_t0".into(), s.t0);
             f.insert("sbpl_alpha1_err".into(), s.alpha1_err);
             f.insert("sbpl_alpha2_err".into(), s.alpha2_err);
             f.insert("sbpl_beta_err".into(), s.beta_err);
-            f.insert("sbpl_d_err".into(), s.d_err);
+            f.insert("sbpl_logd_err".into(), s.logd_err);
             f.insert("sbpl_loga_err".into(), s.loga_err);
             f.insert("sbpl_tb_err".into(), s.tb_err);
             f.insert("sbpl_t0_err".into(), s.t0_err);
@@ -527,8 +527,8 @@ fn extract_sbpl_features(sbpl: &Option<SbplResult>) -> FeatureMap {
         }
         None => {
             for key in [
-                "sbpl_alpha1", "sbpl_alpha2", "sbpl_beta", "sbpl_d", "sbpl_loga", "sbpl_tb", "sbpl_t0",
-                "sbpl_alpha1_err", "sbpl_alpha2_err", "sbpl_beta_err", "sbpl_d_err", "sbpl_loga_err",
+                "sbpl_alpha1", "sbpl_alpha2", "sbpl_beta", "sbpl_logd", "sbpl_loga", "sbpl_tb", "sbpl_t0",
+                "sbpl_alpha1_err", "sbpl_alpha2_err", "sbpl_beta_err", "sbpl_logd_err", "sbpl_loga_err",
                 "sbpl_tb_err", "sbpl_t0_err", "sbpl_reduced_chi2",
                 "sbpl_n_obs", "sbpl_n_bands",
             ] {
